@@ -1,0 +1,8 @@
+*.ilp
+*.zip
+*.rar
+__pycache__/
+.DS_Store
+*.pyc
+results/
+output/

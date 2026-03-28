@@ -1,0 +1,68 @@
+# ============================================================
+# Configuração global — Segmentação de poros EDS/CBS/QEMSCAN
+# ============================================================
+
+ilastik:
+  # Caminho para o arquivo de projeto treinado
+  project_path: "model.ilp"
+
+  # Recursos computacionais
+  n_threads: 4
+  ram_mb: 4096
+
+  # Índice da classe "poro" dentro do mapa de probabilidades.
+  # Para descobrir: rode ilp_reader.py e veja label_names impressos.
+  # Exemplo: ['Pore', 'Particle', 'Matrix'] → pore_class_index = 0
+  pore_class_index: 0
+
+preprocessing:
+  # Tamanho do tile para imagens grandes (0 = sem tiling, processa inteira)
+  tile_size: 0
+
+  # Normalização: "percentile" usa p1/p99; "minmax" usa min/max absoluto
+  normalization: "percentile"
+  norm_percentile_low: 1
+  norm_percentile_high: 99
+
+postprocessing:
+  # Método de threshold sobre o mapa de probabilidade do poro
+  # Opções: "otsu" | "fixed" | "adaptive"
+  threshold_method: "otsu"
+
+  # Usado apenas quando threshold_method = "fixed"
+  threshold_value: 0.5
+
+  # Morfologia binária (pixels). 0 = desativado.
+  morphology_opening_radius: 2
+  morphology_closing_radius: 2
+  morphology_fill_holes: true
+
+  # Tamanho mínimo de poro para análise PARTISAN (pixels)
+  min_pore_area_px: 50
+
+  # Tamanho máximo de poro (0 = sem limite superior)
+  max_pore_area_px: 0
+
+output:
+  # Diretório de saída para todos os resultados
+  output_dir: "results"
+
+  # Formatos de exportação de tabela (csv, excel, json)
+  export_formats:
+    - csv
+    - excel
+
+  # Gerar visualização overlay
+  generate_overlay: true
+
+  # Gerar relatório PDF
+  generate_report: true
+
+  # Colormap para overlay de poros
+  overlay_colormap: "jet"
+
+  # DPI para salvar figuras
+  figure_dpi: 150
+
+logging:
+  level: "INFO"   # DEBUG | INFO | WARNING | ERROR

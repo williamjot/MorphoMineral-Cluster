@@ -85,7 +85,7 @@ class IlastikSegmentor:
                 output_format="hdf5",
             )
             if self.ilastik_exe:
-                kwargs["ilastik_path"] = str(self.ilastik_exe)
+                kwargs["ilastik_script_path"] = str(self.ilastik_exe)
 
             self._eil.run_ilastik(**kwargs)
 

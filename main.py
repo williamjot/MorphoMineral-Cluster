@@ -105,8 +105,36 @@ def run_pipeline(
     image = load_image(image_path)
 
     # ── Passo 2: Validacao ───────────────────────────────────────────────────
-    validator = ImageValidator(expected_channels=None)  # flexivel: aceita gray e multi
-    validator.validate(image, name=stem)
+    validator = ImageValidator(expected_channels=meta.n_input_channels)
+    try:
+        validator.validate(image, name=stem)
+    except ValueError as exc:
+        # Se falhou apenas por canais, tentamos converter automaticamente
+        if "Numero de canais incompativel" in str(exc):
+            logger.warning(f"[{stem}] {exc} -> Tentando conversao automatica...")
+            if meta.n_input_channels == 1:
+                # Converte para grayscale
+                if image.ndim == 3:
+                    if image.shape[2] == 4: # RGBA -> RGB
+                        image = image[:, :, :3]
+                    # Simples media ou luminancia
+                    image = np.mean(image, axis=2).astype(image.dtype)
+                    logger.info(f"[{stem}] Imagem convertida para Grayscale (1 canal).")
+                else:
+                    raise exc
+            elif meta.n_input_channels == 3 and (image.ndim == 2 or image.shape[2] == 1):
+                # Grayscale -> RGB
+                if image.ndim == 2:
+                    image = np.stack([image]*3, axis=-1)
+                else:
+                    image = np.tile(image, (1, 1, 3))
+                logger.info(f"[{stem}] Imagem convertida para RGB (3 canais).")
+            else:
+                raise exc
+            # Re-valida apos conversao
+            validator.validate(image, name=stem)
+        else:
+            raise exc
 
     # ── Passo 3: Normalizacao ────────────────────────────────────────────────
     logger.info(f"[{stem}] Normalizando...")
@@ -137,42 +165,8 @@ def run_pipeline(
         class_names = class_names + [f"Class_{i}" for i in range(len(class_names), n_classes)]
     logger.info(f"[{stem}] Inferencia concluida em {time.time() - t0:.1f}s")
 
-    # ── Passo 5: Threshold ───────────────────────────────────────────────────
-    logger.info(f"[{stem}] Aplicando threshold...")
-    binary = threshold_probability_map(
-        prob_map,
-        method=post_cfg.get("threshold_method", "otsu"),
-        fixed_value=post_cfg.get("threshold_value", 0.5),
-    )
-
-    # ── Passo 6: Morfologia ──────────────────────────────────────────────────
-    logger.info(f"[{stem}] Aplicando morfologia...")
-    binary = apply_morphology(
-        binary,
-        opening_radius=post_cfg.get("morphology_opening_radius", 2),
-        closing_radius=post_cfg.get("morphology_closing_radius", 2),
-        fill_holes=post_cfg.get("morphology_fill_holes", True),
-    )
-
-    # ── Passo 7: Labeling ────────────────────────────────────────────────────
-    logger.info(f"[{stem}] Identificando poros individuais...")
-    labeling = label_pores(
-        binary,
-        min_area_px=post_cfg.get("min_pore_area_px", 50),
-        max_area_px=post_cfg.get("max_pore_area_px", 0),
-    )
-
-    # ── Passo 8: PARTISAN ────────────────────────────────────────────────────
-    logger.info(f"[{stem}] Executando analise PARTISAN ({labeling.n_accepted} poros)...")
-    df = run_partisan(
-        labeling_result=labeling,
-        image_name=stem,
-        partisan_path=partisan_path,
-        show_progress=True,
-    )
-    stats_df = summary_statistics(df) if not df.empty else None
-
-    generated_files = {}
+    import unicodedata
+    import re
 
     def _class_dir_label(name: str, idx: int) -> str:
         txt = unicodedata.normalize("NFKD", str(name)).encode("ascii", "ignore").decode("ascii")
@@ -203,112 +197,122 @@ def run_pipeline(
         class_dir.mkdir(parents=True, exist_ok=True)
         class_output_dirs[class_idx] = class_dir
 
-    # ── Passo 9: Exportacao de tabelas ───────────────────────────────────────
-    logger.info(f"[{stem}] Exportando resultados...")
-    pore_dir = class_output_dirs.get(meta.pore_class_index, output_dir / "Poro")
-    pore_dir.mkdir(parents=True, exist_ok=True)
-    exporter = ResultExporter(
-        output_dir=pore_dir,
-        formats=out_cfg.get("export_formats", ["csv", "excel"]),
-    )
-    exported = exporter.export(df, stem=stem, stats_df=stats_df)
-    generated_files.update(exported)
+    class_colors = [
+        (1.0, 0.15, 0.15),
+        (0.20, 0.70, 0.25),
+        (0.20, 0.45, 0.95),
+        (0.95, 0.65, 0.20),
+    ]
 
-    # Exporta resumo por classe (poro/matriz/particula/etc.) em cada pasta de classe
+    # ── Processamento por Classe ─────────────────────────────────────────────
+    logger.info(f"[{stem}] Iniciando analise multi-classe para {n_classes} classes...")
+    
+    generated_files = {}
     total_px = class_ids.size
+
     for class_idx in range(n_classes):
         class_name = class_names[class_idx]
         class_dir = class_output_dirs[class_idx]
-        class_prob = prob_map_all[:, :, class_idx]
-        class_mask = class_ids == class_idx
-        count = int((class_ids == class_idx).sum())
+        logger.info(f"[{stem}] >>> Analisando Classe {class_idx}: {class_name}")
 
-        class_df = pd.DataFrame([{
+        # ── Passo 5: Threshold (especifico para a classe) ─────────────────────
+        class_prob = prob_map_all[:, :, class_idx]
+        binary = threshold_probability_map(
+            class_prob,
+            method=post_cfg.get("threshold_method", "otsu"),
+            fixed_value=post_cfg.get("threshold_value", 0.5),
+        )
+
+        # ── Passo 6: Morfologia ──────────────────────────────────────────────
+        binary = apply_morphology(
+            binary,
+            opening_radius=post_cfg.get("morphology_opening_radius", 2),
+            closing_radius=post_cfg.get("morphology_closing_radius", 2),
+            fill_holes=post_cfg.get("morphology_fill_holes", True),
+        )
+
+        # ── Passo 7: Labeling ────────────────────────────────────────────────
+        labeling = label_pores(
+            binary,
+            min_area_px=post_cfg.get("min_pore_area_px", 50),
+            max_area_px=post_cfg.get("max_pore_area_px", 0),
+        )
+
+        # ── Passo 8: PARTISAN ────────────────────────────────────────────────
+        if labeling.n_accepted > 0:
+            logger.info(f"[{stem}] Executando PARTISAN para {class_name} ({labeling.n_accepted} objetos)...")
+            df = run_partisan(
+                labeling_result=labeling,
+                image_name=f"{stem}_{class_dir.name}",
+                partisan_path=partisan_path,
+                show_progress=False,
+            )
+            stats_df = summary_statistics(df) if not df.empty else None
+        else:
+            logger.warning(f"[{stem}] Nenhum objeto aceito para a classe {class_name}.")
+            df = pd.DataFrame()
+            stats_df = None
+
+        # ── Passo 9: Exportação de tabelas da classe ──────────────────────────
+        exporter = ResultExporter(
+            output_dir=class_dir,
+            formats=out_cfg.get("export_formats", ["csv", "excel"]),
+        )
+        exported = exporter.export(df, stem=f"{stem}_{class_dir.name}", stats_df=stats_df)
+        generated_files.update({f"{class_name}_{k}": v for k, v in exported.items()})
+
+        # Resumo de pixels por classe
+        count = int((class_ids == class_idx).sum())
+        summary_df = pd.DataFrame([{
             "class_index": class_idx,
             "class_name": class_name,
+            "count_objects": labeling.n_accepted,
             "pixel_count": count,
-            "pixel_pct": (100.0 * count / total_px) if total_px > 0 else 0.0,
+            "area_pct": (100.0 * count / total_px) if total_px > 0 else 0.0,
             "prob_mean": float(class_prob.mean()),
-            "prob_std": float(class_prob.std()),
-            "prob_min": float(class_prob.min()),
-            "prob_max": float(class_prob.max()),
         }])
+        summary_csv = class_dir / f"{stem}_{class_dir.name}_summary.csv"
+        summary_df.to_csv(summary_csv, index=False)
 
-        class_csv = class_dir / f"{stem}_{class_dir.name}_summary.csv"
-        class_df.to_csv(class_csv, index=False, float_format="%.6f")
-        generated_files[f"csv_class_{class_idx}"] = class_csv
-        logger.info(f"CSV salvo: {class_csv}")
-
-    # ── Passo 10: Visualizacoes ──────────────────────────────────────────────
-    image_paths_for_report = {}
-    if out_cfg.get("generate_overlay", True):
-        logger.info(f"[{stem}] Gerando visualizacoes...")
-        class_colors = [
-            (1.0, 0.15, 0.15),
-            (0.20, 0.70, 0.25),
-            (0.20, 0.45, 0.95),
-            (0.95, 0.65, 0.20),
-        ]
-
-        for class_idx in range(n_classes):
-            class_name = class_names[class_idx]
-            class_dir = class_output_dirs[class_idx]
-            class_prob = prob_map_all[:, :, class_idx]
-            class_mask = class_ids == class_idx
-            viz_class = Visualizer(
+        # ── Passo 10: Visualizações da classe ─────────────────────────────────
+        image_paths_for_class = {}
+        if out_cfg.get("generate_overlay", True):
+            viz = Visualizer(
                 output_dir=class_dir,
                 dpi=out_cfg.get("figure_dpi", 150),
                 cmap_overlay=out_cfg.get("overlay_colormap", "jet"),
             )
             color = class_colors[class_idx % len(class_colors)]
 
-            p_prob = viz_class.save_probability_map(
-                class_prob,
-                stem=f"{stem}_{class_dir.name}_prob",
-                class_name=class_name,
+            p_prob = viz.save_probability_map(class_prob, stem=f"{stem}_{class_dir.name}_prob", class_name=class_name)
+            p_over = viz.save_overlay(image, class_ids == class_idx, stem=f"{stem}_{class_dir.name}_overlay", color=color, class_name=class_name)
+            p_lab  = viz.save_label_overlay(image, labeling.label_map, stem=f"{stem}_{class_dir.name}_labels")
+            
+            image_paths_for_class = {
+                "Probabilidade": p_prob,
+                "Overlay": p_over,
+                "Labels": p_lab
+            }
+            
+            if not df.empty:
+                image_paths_for_class["Histogramas"] = viz.save_histograms(df, stem=f"{stem}_{class_dir.name}_hist")
+
+        # ── Passo 11: Relatório PDF Individual ───────────────────────────────
+        if out_cfg.get("generate_report", True):
+            reporter = PDFReporter(output_dir=class_dir)
+            pdf_path = reporter.generate(
+                image_name=f"{image_path.name} ({class_name})",
+                porosity_pct=(100.0 * count / total_px),
+                n_pores=labeling.n_accepted,
+                df=df,
+                stats_df=stats_df,
+                image_paths=image_paths_for_class,
+                config=cfg,
+                stem=f"{stem}_{class_dir.name}_report",
             )
-            p_overlay = viz_class.save_overlay(
-                image,
-                class_mask,
-                stem=f"{stem}_{class_dir.name}_overlay",
-                color=color,
-                class_name=class_name,
-            )
+            generated_files[f"pdf_{class_name}"] = pdf_path
 
-            if class_idx == meta.pore_class_index:
-                image_paths_for_report["Mapa de Probabilidade (Poro)"] = p_prob
-                image_paths_for_report["Overlay (Poro)"] = p_overlay
-
-        viz_pore = Visualizer(
-            output_dir=pore_dir,
-            dpi=out_cfg.get("figure_dpi", 150),
-            cmap_overlay=out_cfg.get("overlay_colormap", "jet"),
-        )
-        p = viz_pore.save_label_overlay(image, labeling.label_map, stem=f"{stem}_labels")
-        image_paths_for_report["Poros Individuais"] = p
-
-        if not df.empty:
-            p = viz_pore.save_histograms(df, stem=f"{stem}_histograms")
-            image_paths_for_report["Histogramas PARTISAN"] = p
-
-            p = viz_pore.save_scatter(df, stem=f"{stem}_scatter")
-            image_paths_for_report["Scatter CI_Circ vs CI_AR"] = p
-
-    # ── Passo 11: Relatorio PDF ──────────────────────────────────────────────
-    if out_cfg.get("generate_report", True):
-        logger.info(f"[{stem}] Gerando relatorio PDF...")
-        reporter = PDFReporter(output_dir=output_dir)
-        pdf_path = reporter.generate(
-            image_name=image_path.name,
-            porosity_pct=labeling.porosity_pct,
-            n_pores=labeling.n_accepted,
-            df=df,
-            stats_df=stats_df,
-            image_paths=image_paths_for_report,
-            config=cfg,
-            stem=f"{stem}_report",
-        )
-        generated_files["pdf"] = pdf_path
+    logger.info(f"[{stem}] Pipeline multi-classe concluido. Resultados em: {output_dir}")
 
     logger.info(
         f"[{stem}] Pipeline concluido — "

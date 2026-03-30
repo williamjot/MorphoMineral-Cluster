@@ -1,0 +1,19 @@
+# Core
+numpy
+pandas
+h5py
+PyYAML
+
+# Processamento de Imagem
+scikit-image
+scipy
+imageio
+tifffile
+
+# Ilastik Integration
+easilastik>=2.0.0
+
+# Saída e Relatórios
+matplotlib
+fpdf2
+openpyxl

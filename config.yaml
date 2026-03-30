@@ -3,16 +3,18 @@
 # ============================================================
 
 ilastik:
+  # Caminho para o executável do Ilastik
+  ilastik_exe: "D:\\WILLIAM\\ilastik-1.4.1.post1\\ilastik.exe"
+
   # Caminho para o arquivo de projeto treinado
-  project_path: "model.ilp"
+  project_path: "D:\\WILLIAM\\PHYGEO2026\\MORPHO\\pore_segmentation\\MyProject.ilp"
 
   # Recursos computacionais
   n_threads: 4
   ram_mb: 4096
 
   # Índice da classe "poro" dentro do mapa de probabilidades.
-  # Para descobrir: rode ilp_reader.py e veja label_names impressos.
-  # Exemplo: ['Pore', 'Particle', 'Matrix'] → pore_class_index = 0
+  # No seu log, 'Grão 1' é índice 0. Se os poros forem 'Matriz', mude para 1.
   pore_class_index: 0
 
 preprocessing:
